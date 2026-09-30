@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ur" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Professor — Apna AI Study Tutor</title>
+  <meta name="description" content="PDF parhao, awaz me parho. Gemini Live se chalne wala mobile-friendly study tutor.">
+  <link rel="stylesheet" href="styles.css">
+  <!-- Firebase Auth (compat CDN) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <!-- pdf.js for document rendering -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- mermaid for diagrams -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">🎓 Professor</div>
+  <div class="topbar-right">
+    <span id="user-chip" class="user-chip hidden"></span>
+    <button id="btn-theme" class="icon-btn" title="Theme badlein">🌙</button>
+    <button id="btn-logout" class="btn small ghost hidden">Logout</button>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- ============ SCREEN 1: LOGIN ============ -->
+  <section id="screen-login" class="screen">
+    <div class="card auth-card">
+      <h1>Khush aamdeed 👋</h1>
+      <p class="muted">Apna AI study tutor — PDF upload karein, awaz me sawal poochein.</p>
+
+      <div id="firebase-notice" class="notice hidden"></div>
+
+      <label class="field">Email
+        <input id="login-email" type="email" autocomplete="email" placeholder="aap@email.com">
+      </label>
+      <label class="field">Password
+        <input id="login-pass" type="password" autocomplete="current-password" placeholder="••••••••">
+      </label>
+
+      <div class="row">
+        <button id="btn-login" class="btn primary">Login</button>
+        <button id="btn-signup" class="btn">Naya account</button>
+      </div>
+
+      <div class="divider"><span>ya</span></div>
+
+      <button id="btn-google" class="btn wide">🔵 Google se login</button>
+      <button id="btn-demo" class="btn wide ghost hidden">Demo mode (baghair login ke try karein)</button>
+
+      <p id="auth-error" class="error"></p>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN 2: API KEY ============ -->
+  <section id="screen-key" class="screen hidden">
+    <div class="card">
+      <h2>🔑 Gemini API Key</h2>
+      <p class="muted">
+        Yeh key <b>sirf aap ki</b> hai (BYOK). Sirf aap ke browser me save hogi —
+        hamare kisi server ko kabhi nahi bheji jayegi, kyunke koi server hai hi nahi.
+        Free key yahan se lein:<br>
+        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>
+      </p>
+
+      <label class="field">API Key
+        <span class="input-row">
+          <input id="api-key-input" type="password" placeholder="AIza..." autocomplete="off" spellcheck="false">
+          <button id="btn-toggle-key" class="btn small" title="Key dikhayein/chhupayein">👁</button>
+        </span>
+      </label>
+
+      <div class="row">
+        <button id="btn-test-key" class="btn">Test key</button>
+        <button id="btn-save-key" class="btn primary">Save aur agay →</button>
+      </div>
+      <p id="key-status" class="muted"></p>
+      <button id="btn-back-login" class="btn ghost small">← Wapas login par</button>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN 3: MAIN ============ -->
+  <section id="screen-main" class="screen hidden">
+    <div class="session-bar">
+      <span id="status-pill" class="pill off">Disconnected</span>
+      <button id="btn-session" class="btn primary small">▶ Session start</button>
+      <span id="doc-name" class="muted ellipsis"></span>
+    </div>
+
+    <div class="workspace">
+      <!-- LEFT: document viewer -->
+      <div class="panel doc-panel">
+        <div id="dropzone" class="dropzone">
+          <div class="drop-icon">📄</div>
+          <p><b>Apni PDF, slides ya notes yahan drop karein</b></p>
+          <p class="muted">ya tap karke file chunein</p>
+        </div>
+        <div id="pdf-toolbar" class="toolbar hidden">
+          <button id="btn-prev" class="icon-btn" title="Pichla page">‹</button>
+          <span id="page-info" class="muted">1 / 1</span>
+          <button id="btn-next" class="icon-btn" title="Agla page">›</button>
+          <span class="spacer"></span>
+          <button id="btn-zoom-out" class="icon-btn" title="Chhota">−</button>
+          <button id="btn-zoom-in" class="icon-btn" title="Bara">+</button>
+          <button id="btn-new-doc" class="btn small ghost">Nayi file</button>
+        </div>
+        <div class="pdf-scroll">
+          <canvas id="pdf-canvas" class="hidden"></canvas>
+        </div>
+        <input type="file" id="file-input" accept="application/pdf,.pdf" hidden>
+      </div>
+
+      <!-- RIGHT: live workspace -->
+      <div class="panel live-panel">
+        <div class="mic-row">
+          <button id="btn-mic" class="mic-btn" disabled title="Mic on/off">🎤</button>
+          <canvas id="visualizer" width="300" height="52"></canvas>
+        </div>
+        <p id="mic-hint" class="muted small">Mic ke liye pehle "Session start" dabayein</p>
+
+        <div class="tabs">
+          <button class="tab active" data-tab="transcript">Transcript</button>
+          <button class="tab" data-tab="diagram">Diagram</button>
+          <button class="tab" data-tab="quiz">Quiz</button>
+        </div>
+
+        <div id="tab-transcript" class="tab-body">
+          <div id="transcript" class="transcript">
+            <p class="muted placeholder">Abhi koi guftagu nahi — session start karke bolein 🎙</p>
+          </div>
+        </div>
+
+        <div id="tab-diagram" class="tab-body hidden">
+          <div id="diagram-wrap">
+            <p class="muted placeholder">Diagram yahan nazar ayega — tutor se kahein "is ka diagram banao"</p>
+          </div>
+        </div>
+
+        <div id="tab-quiz" class="tab-body hidden">
+          <button id="btn-quiz" class="btn wide">📝 Quiz banao (3 sawal)</button>
+          <div id="quiz-wrap"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div id="toast-wrap"></div>
+
+<script src="firebase-config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
