@@ -90,6 +90,8 @@ a { color: var(--accent); }
 .field input:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
 .input-row { display: flex; gap: 8px; margin-top: 6px; }
 .input-row input { flex: 1; margin-top: 0; }
+.chat-row { margin: 10px 0 6px; }
+.chat-row input { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel-2); color: inherit; font-size: 15px; }
 
 .btn {
   padding: 11px 18px; font-size: 0.95rem; font-weight: 600;
@@ -137,6 +139,7 @@ a { color: var(--accent); }
   background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
 }
 .pill.live { background: rgba(62, 207, 142, 0.15); border-color: var(--green); color: var(--green); }
+.pill.ready { background: rgba(62, 207, 142, 0.15); border-color: var(--green); color: var(--green); }
 .pill.connecting { background: rgba(245, 165, 36, 0.15); border-color: var(--amber); color: var(--amber); }
 .pill.off { color: var(--muted); }
 
