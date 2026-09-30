@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Professor — Apna AI Study Tutor</title>
-  <meta name="description" content="PDF parhao, awaz me parho. Gemini Live se chalne wala mobile-friendly study tutor.">
+  <meta name="description" content="PDF parhao, awaz me parho. Gemini AI se chalne wala mobile-friendly study tutor.">
   <link rel="stylesheet" href="styles.css">
   <!-- Firebase Auth (compat CDN) -->
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
@@ -69,7 +69,7 @@
 
       <label class="field">API Key
         <span class="input-row">
-          <input id="api-key-input" type="password" placeholder="AIza..." autocomplete="off" spellcheck="false">
+          <input id="api-key-input" type="password" placeholder="API key yahan paste karein" autocomplete="off" spellcheck="false">
           <button id="btn-toggle-key" class="btn small" title="Key dikhayein/chhupayein">👁</button>
         </span>
       </label>
@@ -86,8 +86,8 @@
   <!-- ============ SCREEN 3: MAIN ============ -->
   <section id="screen-main" class="screen hidden">
     <div class="session-bar">
-      <span id="status-pill" class="pill off">Disconnected</span>
-      <button id="btn-session" class="btn primary small">▶ Session start</button>
+      <span id="status-pill" class="pill off">…</span>
+      <button id="btn-speaker" class="icon-btn" title="Tutor ki awaz on/off">🔊</button>
       <span id="doc-name" class="muted ellipsis"></span>
     </div>
 
@@ -118,9 +118,12 @@
       <div class="panel live-panel">
         <div class="mic-row">
           <button id="btn-mic" class="mic-btn" disabled title="Mic on/off">🎤</button>
-          <canvas id="visualizer" width="300" height="52"></canvas>
+          <p id="mic-hint" class="muted small">Pehle API key save karein</p>
         </div>
-        <p id="mic-hint" class="muted small">Mic ke liye pehle "Session start" dabayein</p>
+        <div class="input-row chat-row">
+          <input id="chat-input" type="text" placeholder="Yahan likhein ya 🎤 dabayein…" autocomplete="off">
+          <button id="btn-send" class="btn primary small">Bhejein</button>
+        </div>
 
         <div class="tabs">
           <button class="tab active" data-tab="transcript">Transcript</button>
@@ -130,7 +133,7 @@
 
         <div id="tab-transcript" class="tab-body">
           <div id="transcript" class="transcript">
-            <p class="muted placeholder">Abhi koi guftagu nahi — session start karke bolein 🎙</p>
+            <p class="muted placeholder">Abhi koi guftagu nahi — neeche likhein ya 🎤 dabayein 🎙</p>
           </div>
         </div>
 
