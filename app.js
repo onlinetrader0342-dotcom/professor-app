@@ -1,6 +1,7 @@
 /* ==========================================================================
  * Professor — mobile-friendly static web app
- * Gemini Live API (WebSocket) se chalne wala AI study tutor.
+ * Gemini text API (generateContent) + Web Speech API se chalne wala
+ * AI study tutor (Voice Tutor mode).
  * Koi backend/server nahi: API key end-user ki (BYOK), sirf localStorage me.
  * ========================================================================== */
 'use strict';
@@ -41,30 +42,27 @@ function show(id) {
 }
 function goLogin()  { show('screen-login'); }
 function goKey()    { show('screen-key'); }
-function goMain()   { show('screen-main'); updateSessionUI(); }
+function goMain()   { show('screen-main'); setReady(); }
 
 /* ---------------- global state ---------------- */
 let currentUser = null;      // firebase user ya demo user
 let demoMode = false;
 let apiKey = '';
-let session = null;          // LiveSession instance
-let micHandle = null;        // mic capture handle
-let recording = false;
-let docText = '';            // PDF se nikala hua text (Live context ke liye)
+let docText = '';            // PDF se nikala hua text (tutor context ke liye)
 let docName = '';
 let transcriptEl, diagramWrap, quizWrap;
-let currentAiDiv = null;     // streaming AI message ka div
-let collectingQuiz = false;
-let quizBuffer = '';
-let renderedDiagramCount = 0;
-let vizRAF = null;
+let chatHistory = [];        // [{role:'user'|'model', text}] — aakhri 10 turns bhejte hain
+let recog = null;            // SpeechRecognition instance
+let recogLang = 'ur-PK';
+let recogRetried = false;
+let listening = false;
+let speakerOn = localStorage.getItem('sc-speaker') !== 'off';
 
-const LIVE_WS_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
-const LIVE_MODEL = 'models/gemini-3.1-flash-live-preview';
+const TEXT_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent';
 const SYSTEM_PROMPT = 'You are a friendly study tutor. Explain clearly in simple words, ' +
-  'ask Socratic questions to check understanding, and keep answers concise. ' +
-  'If the user asks for a diagram, output a ```mermaid code block. ' +
-  'The user speaks Roman Urdu / English mix — reply in the same mix.';
+  'ask Socratic questions to check understanding, and keep answers concise (short paragraphs). ' +
+  'The user speaks Roman Urdu / English mix — reply in the same mix. ' +
+  'If the user asks for a diagram, output a ```mermaid code block.';
 
 /* ==========================================================================
  * Firebase Auth — email/password + Google sign-in (compat CDN)
@@ -181,7 +179,8 @@ function wireAuth() {
     currentUser = null;
     demoMode = false;
     updateUserChip();
-    stopSessionQuiet();
+    stopSpeaking();
+    stopListening();
     goLogin();
   });
 
@@ -214,374 +213,255 @@ function wireKeyScreen() {
     const st = $('key-status');
     st.textContent = '⏳ Key test ho rahi hai...';
     try {
-      const s = new LiveSession(k, {});
-      await s.testOnly();
-      st.textContent = '✅ Key theek hai — Live API se connect ho gaya!';
+      await testKey(k);
+      st.textContent = '✅ Key theek hai — tutor tayyar hai!';
       toast('Key theek hai ✓', true);
     } catch (e) {
-      st.textContent = '❌ ' + liveErrMsg(e);
+      st.textContent = '❌ ' + apiErrMsg(e);
     }
   });
 }
 
-function liveErrMsg(e) {
+async function testKey(k) {
+  const res = await fetch(TEXT_API_URL + '?key=' + encodeURIComponent(k), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Reply with one word: ok' }] }] })
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const j = await res.json();
+  const cand = (j.candidates || [])[0];
+  const txt = cand && cand.content && cand.content.parts
+    ? cand.content.parts.map(p => p.text || '').join('').trim() : '';
+  if (!/ok/i.test(txt)) throw new Error('unexpected reply');
+}
+
+function apiErrMsg(e) {
   const m = (e && e.message) || '';
-  if (m.includes('timeout')) return 'Server ne jawab nahi diya — internet ya key check karein.';
-  if (m.includes('400') || m.includes('invalid') || m.includes('API key')) return 'Key ghalat lag rahi hai — aistudio.google.com/apikey se nayi key lein.';
-  if (m.includes('socket') || m.includes('closed')) return 'Connect nahi ho saka — internet check karein.';
-  return 'Key test nakaam — key aur internet check karein.';
+  if (m.includes('400') || m.includes('API key')) return 'Key ghalat lag rahi hai — aistudio.google.com/apikey se nayi key lein.';
+  if (m.includes('403')) return 'Is key par yeh model allowed nahi — AI Studio me nayi key banayein.';
+  if (m.includes('429')) return 'Limit khatm ho gayi — thori der baad koshish karein.';
+  if (m.includes('Failed to fetch') || m.includes('NetworkError')) return 'Internet ka masla lagta hai — dobara koshish karein.';
+  return 'Jawab nahi mila — key aur internet check karein.';
 }
 
 /* ==========================================================================
- * Audio helpers — PCM16 base64 encode/decode, 16kHz downsampling
- * ========================================================================== */
-function base64FromInt16(int16) {
-  // bytes par fromCharCode lagao (seedhe int16 values par nahi —
-  // negative values ka byte order bigar jata hai)
-  const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
-  let s = '';
-  const CH = 0x8000;
-  for (let i = 0; i < bytes.length; i += CH) {
-    s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
-  }
-  return btoa(s);
-}
-function int16FromBase64(b64) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Int16Array(bytes.buffer);
-}
-function floatTo16(float32) {
-  const out = new Int16Array(float32.length);
-  for (let i = 0; i < float32.length; i++) {
-    const v = Math.max(-1, Math.min(1, float32[i]));
-    out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
-  }
-  return out;
-}
-function downsample(float32, inRate, outRate) {
-  if (inRate === outRate) return float32;
-  const ratio = inRate / outRate;
-  const len = Math.floor(float32.length / ratio);
-  const out = new Float32Array(len);
-  for (let i = 0; i < len; i++) out[i] = float32[Math.floor(i * ratio)];
-  return out;
-}
-
-/* ---------------- Audio OUT: server ki 24kHz audio chalana ---------------- */
-class AudioOut {
-  constructor() { this.ctx = null; this.queue = []; this.nextTime = 0; this.playing = false; }
-  ensure() {
-    if (!this.ctx) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      this.ctx = new AC({ sampleRate: 24000 });
-    }
-    if (this.ctx.state === 'suspended') this.ctx.resume();
-  }
-  enqueue(b64) {
-    try {
-      this.ensure();
-      const i16 = int16FromBase64(b64);
-      const f32 = new Float32Array(i16.length);
-      for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
-      const buf = this.ctx.createBuffer(1, f32.length, 24000);
-      buf.getChannelData(0).set(f32);
-      this.queue.push(buf);
-      this.schedule();
-    } catch (e) { console.error('Audio decode fail:', e); }
-  }
-  schedule() {
-    if (this.playing) return;
-    this.playing = true;
-    const playNext = () => {
-      const buf = this.queue.shift();
-      if (!buf) { this.playing = false; return; }
-      const src = this.ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(this.ctx.destination);
-      const t = Math.max(this.ctx.currentTime, this.nextTime);
-      try { src.start(t); } catch (e) { this.playing = false; return; }
-      this.nextTime = t + buf.duration;
-      src.onended = playNext;
-    };
-    playNext();
-  }
-  interrupt() { this.queue.length = 0; this.nextTime = 0; } // user ne beech me bola
-}
-
-/* ---------------- Audio IN: mic → 16kHz PCM16 ---------------- */
-async function startMicCapture(onChunk, analyserOut) {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-  });
-  const AC = window.AudioContext || window.webkitAudioContext;
-  const ctx = new AC();
-  if (ctx.state === 'suspended') await ctx.resume();
-  const src = ctx.createMediaStreamSource(stream);
-  const analyser = ctx.createAnalyser();
-  analyser.fftSize = 256;
-  src.connect(analyser);
-  analyserOut.node = analyser;
-
-  const proc = ctx.createScriptProcessor(4096, 1, 1);
-  const inRate = ctx.sampleRate;
-  proc.onaudioprocess = (e) => {
-    const ch = e.inputBuffer.getChannelData(0);
-    const down = downsample(ch, inRate, 16000);
-    onChunk(base64FromInt16(floatTo16(down)));
-  };
-  // onaudioprocess chalne ke liye graph destination se jurna zaroori hai —
-  // gain 0 taake feedback/echo na ho.
-  const zero = ctx.createGain();
-  zero.gain.value = 0;
-  src.connect(proc);
-  proc.connect(zero);
-  zero.connect(ctx.destination);
-
-  return {
-    stop() {
-      try { proc.disconnect(); src.disconnect(); } catch (e) {}
-      stream.getTracks().forEach(t => t.stop());
-      ctx.close().catch(() => {});
-    }
-  };
-}
-
-/* ==========================================================================
- * LiveSession — Gemini Live API WebSocket client
- * ========================================================================== */
-class LiveSession {
-  constructor(key, handlers) {
-    this.key = key;
-    this.h = handlers || {};
-    this.ws = null;
-    this.audioOut = new AudioOut();
-    this.ready = false;
-  }
-
-  _send(obj) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(obj));
-  }
-
-  connect(systemInstruction) {
-    // Live session: setupComplete par resolve, socket khula rehta hai
-    return new Promise((resolve, reject) => {
-      let done = false;
-      const finish = (fn, val) => { if (!done) { done = true; clearTimeout(timer); fn(val); } };
-      const timer = setTimeout(() => { try { this.ws.close(); } catch (e) {} finish(reject, new Error('timeout')); }, 25000);
-
-      const ws = new WebSocket(LIVE_WS_URL + '?key=' + encodeURIComponent(this.key));
-      this.ws = ws;
-      ws.onopen = () => {
-        this._send({
-          setup: {
-            model: LIVE_MODEL,
-            responseModalities: ['AUDIO', 'TEXT'],
-            systemInstruction: { parts: [{ text: systemInstruction }] }
-          }
-        });
-      };
-      ws.onmessage = (ev) => this._onMessage(ev.data, (ok, err) => ok ? finish(resolve) : finish(reject, err));
-      ws.onerror = () => finish(reject, new Error('socket error'));
-      ws.onclose = () => {
-        this.ready = false;
-        if (this.h.onClose) this.h.onClose();
-      };
-    });
-  }
-
-  async testOnly() {
-    // Sirf key test: setupComplete milte hi band kar do
-    await this.connect('You are a test. Reply with one word: ok.');
-    this.close();
-  }
-
-  _onMessage(raw, setupCb) {
-    let msg;
-    try { msg = JSON.parse(raw); } catch (e) { return; }
-
-    if (msg.setupComplete) {
-      this.ready = true;
-      if (setupCb) setupCb(true);
-      if (this.h.onReady) this.h.onReady();
-      return;
-    }
-    const sc = msg.serverContent;
-    if (!sc) return;
-    if (sc.interrupted) { this.audioOut.interrupt(); return; } // user ne beech me bola
-    const turn = sc.modelTurn;
-    if (turn && Array.isArray(turn.parts)) {
-      for (const p of turn.parts) {
-        if (p.inlineData && p.inlineData.data) this.audioOut.enqueue(p.inlineData.data); // 24kHz audio
-        else if (typeof p.text === 'string' && p.text) {
-          if (this.h.onText) this.h.onText(p.text);
-        }
-      }
-    }
-    if (sc.turnComplete && this.h.onTurnComplete) this.h.onTurnComplete();
-  }
-
-  sendText(text) {
-    this._send({ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true } });
-  }
-  sendAudioChunk(b64) {
-    this._send({ realtimeInput: { audio: { data: b64, mimeType: 'audio/pcm;rate=16000' } } });
-  }
-  close() {
-    try { if (this.ws) this.ws.close(); } catch (e) {}
-    this.ws = null;
-    this.ready = false;
-  }
-}
-
-/* ==========================================================================
- * Session controls — start/stop, status pill, mic toggle + visualizer
+ * Voice Tutor — Gemini text API (generateContent) + Web Speech API.
+ * Koi WebSocket nahi. Mic: SpeechRecognition (ur-PK → en-US fallback).
+ * Speaker: speechSynthesis (ur-PK voice preferred).
  * ========================================================================== */
 function setStatus(state, label) {
   const pill = $('status-pill');
-  pill.className = 'pill ' + (state === 'live' ? 'live' : state === 'connecting' ? 'connecting' : 'off');
+  pill.className = 'pill ' + state; // 'ready' | 'off'
   pill.textContent = label;
 }
 
-function updateSessionUI() {
-  const live = session && session.ready;
-  $('btn-session').textContent = live ? '⏹ Session stop' : '▶ Session start';
-  $('btn-session').classList.toggle('primary', !live);
-  $('btn-mic').disabled = !live;
-  if (!live) {
-    $('mic-hint').textContent = 'Mic ke liye pehle "Session start" dabayein';
-    setMicRecording(false);
+function setReady() {
+  if (apiKey) {
+    setStatus('ready', 'Tayyar ✓');
+    $('btn-mic').disabled = false;
+    $('mic-hint').textContent = '🎤 dabayein aur bolein, ya neeche likh kar bhejein';
   } else {
-    $('mic-hint').textContent = '🎤 dabayein aur bolein — tutor sun raha hai';
+    setStatus('off', 'Key chahiye');
+    $('btn-mic').disabled = true;
+    $('mic-hint').textContent = 'Pehle API key save karein';
   }
 }
 
-async function startSession() {
+async function callGemini() {
+  const turns = [];
+  turns.push({ role: 'user', parts: [{ text: SYSTEM_PROMPT }] });
+  if (docText) {
+    turns.push({ role: 'user', parts: [{ text: 'Neeche ek document ka text hai. Isi document par tutor karo, is se bahar ki baatein sirf zaroorat par karo:\n\n' + docText.slice(0, 60000) }] });
+  }
+  for (const t of chatHistory.slice(-10)) {
+    turns.push({ role: t.role, parts: [{ text: t.text }] });
+  }
+  const res = await fetch(TEXT_API_URL + '?key=' + encodeURIComponent(apiKey), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: turns,
+      generationConfig: { temperature: 0.7 }
+    })
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const j = await res.json();
+  const cand = (j.candidates || [])[0];
+  if (!cand || !cand.content || !cand.content.parts) throw new Error('empty reply');
+  return cand.content.parts.map(p => p.text || '').join('').trim();
+}
+
+async function askTutor(userText, mode) {
   if (!apiKey) { toast('Pehle API key save karein'); goKey(); return; }
-  setStatus('connecting', 'Connecting...');
-  $('btn-session').disabled = true;
-  addMsg('user', '— session start ho rahi hai… —');
-
-  session = new LiveSession(apiKey, {
-    onText: handleModelText,
-    onTurnComplete: () => { currentAiDiv = null; if (collectingQuiz) finishQuiz(); },
-    onClose: () => {
-      setStatus('off', 'Disconnected');
-      stopMicQuiet();
-      updateSessionUI();
-      $('btn-session').disabled = false;
-    }
-  });
-
+  stopSpeaking();
+  stopListening();
+  addMsg('user', mode === 'quiz' ? '📝 Quiz ban raha hai…' : userText);
+  chatHistory.push({ role: 'user', text: userText });
+  const typing = addMsg('ai', '⏳ Soch raha hun…');
   try {
-    await session.connect(SYSTEM_PROMPT);
-    setStatus('live', 'Live');
-    addMsg('ai', 'Assalam-o-Alaikum! 👋 Me aap ka study tutor hun. ' +
-      (docText ? 'Aap ki file parh li hai — us par sawal poochein ya kahein "quiz banao".' : 'Bolein, kya parhna hai?'));
-    // document ka text context ke tor par bhejo
-    if (docText) {
-      session.sendText('Neeche ek document ka text hai. Isi document par tutor karo, ' +
-        'is se bahar ki baatein sirf zaroorat par karo:\n\n' + docText.slice(0, 60000));
+    const reply = await callGemini();
+    typing.remove();
+    chatHistory.push({ role: 'model', text: reply });
+    if (mode === 'quiz') {
+      renderQuiz(parseQuiz(reply));
+      switchTab('quiz');
+      addMsg('ai', 'Quiz tayyar hai! 📝 Quiz tab me dekhein.');
+      speak('Quiz tayyar hai. Quiz tab me dekh lein.');
+      toast('Quiz tayyar hai! 📝', true);
+    } else {
+      handleTutorReply(reply);
     }
-    toast('Live session shuru! 🎙', true);
   } catch (e) {
-    console.error('Session failed:', e);
-    setStatus('off', 'Disconnected');
-    session = null;
-    toast('Session start nahi hui: ' + liveErrMsg(e));
+    console.error('Tutor failed:', e);
+    typing.remove();
+    addMsg('ai', '⚠️ ' + apiErrMsg(e));
+    toast(apiErrMsg(e));
   }
-  $('btn-session').disabled = false;
-  updateSessionUI();
 }
 
-function stopSession() {
-  stopMicQuiet();
-  if (session) { session.close(); session = null; }
-  setStatus('off', 'Disconnected');
-  updateSessionUI();
-  addMsg('user', '— session khatam —');
-}
-function stopSessionQuiet() {
-  stopMicQuiet();
-  if (session) { try { session.close(); } catch (e) {} session = null; }
+function handleTutorReply(reply) {
+  addMsg('ai', reply);
+  renderDiagrams(false);
+  speak(reply);
 }
 
-function wireSession() {
-  $('btn-session').addEventListener('click', () => {
-    if (session && session.ready) stopSession();
-    else startSession();
+/* ---------------- Speaker (speechSynthesis) ---------------- */
+function pickVoice() {
+  try {
+    const vs = speechSynthesis.getVoices() || [];
+    return vs.find(v => v.lang && v.lang.toLowerCase().indexOf('ur') === 0) || null;
+  } catch (e) { return null; }
+}
+function speak(text) {
+  if (!speakerOn) return;
+  if (!('speechSynthesis' in window)) return;
+  stopSpeaking();
+  const clean = text
+    .replace(/```mermaid[\s\S]*?```/gi, ' (diagram banaya gaya hai) ')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/[*_#`>]/g, '')
+    .trim();
+  if (!clean) return;
+  try {
+    const u = new SpeechSynthesisUtterance(clean);
+    const v = pickVoice();
+    if (v) { u.voice = v; u.lang = v.lang; } else { u.lang = 'ur-PK'; }
+    u.rate = 1;
+    speechSynthesis.speak(u);
+  } catch (e) { console.error('Speak fail:', e); }
+}
+function stopSpeaking() {
+  try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
+}
+function wireSpeaker() {
+  const btn = $('btn-speaker');
+  const paint = () => { btn.textContent = speakerOn ? '🔊' : '🔇'; };
+  paint();
+  btn.addEventListener('click', () => {
+    speakerOn = !speakerOn;
+    localStorage.setItem('sc-speaker', speakerOn ? 'on' : 'off');
+    if (!speakerOn) stopSpeaking();
+    paint();
+    toast(speakerOn ? 'Tutor ki awaz on 🔊' : 'Tutor ki awaz off 🔇', true);
   });
-  $('btn-mic').addEventListener('click', toggleMic);
 }
 
-/* ---------------- mic toggle + visualizer ---------------- */
-function setMicRecording(on) {
-  recording = on;
+/* ---------------- Mic: Web Speech API ---------------- */
+function speechRecogCtor() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+function setListening(on) {
+  listening = on;
   $('btn-mic').classList.toggle('recording', on);
   $('btn-mic').textContent = on ? '⏹' : '🎤';
-  if (on) startVisualizer(); else stopVisualizer();
+  $('mic-hint').textContent = on ? '🔴 Sun raha hun… bolein' : '🎤 dabayein aur bolein, ya neeche likh kar bhejein';
 }
-
-async function toggleMic() {
-  if (!session || !session.ready) { toast('Pehle session start karein'); return; }
-  if (recording) { stopMicQuiet(); setMicRecording(false); $('mic-hint').textContent = 'Mic band — dobara 🎤 dabayein'; return; }
-  try {
-    const analyserBox = {};
-    micHandle = await startMicCapture(
-      (b64) => { if (session && session.ready) session.sendAudioChunk(b64); },
-      analyserBox
-    );
-    window._vizAnalyser = analyserBox.node;
-    setMicRecording(true);
-    $('mic-hint').textContent = '🔴 Recording… bolein, tutor sun raha hai';
-    addMsg('user', '🎤 (awaz bheji ja rahi hai…)');
-  } catch (e) {
-    console.error('Mic failed:', e);
-    if (e && e.name === 'NotAllowedError') toast('Mic ki ijazat nahi mili — browser settings me allow karein.');
-    else if (e && e.name === 'NotFoundError') toast('Koi mic nahi mila — device check karein.');
-    else toast('Mic on nahi ho saka — dobara koshish karein.');
+function startListening() {
+  const SR = speechRecogCtor();
+  if (!SR) {
+    toast('Is browser me mic wali sahulat nahi — neeche likh kar bhejein.');
+    $('chat-input').focus();
+    return;
   }
-}
-function stopMicQuiet() {
-  if (micHandle) { try { micHandle.stop(); } catch (e) {} micHandle = null; }
-  window._vizAnalyser = null;
-  if (recording) setMicRecording(false);
-}
-
-function startVisualizer() {
-  const cv = $('visualizer');
-  const ctx2d = cv.getContext('2d');
-  const draw = () => {
-    vizRAF = requestAnimationFrame(draw);
-    const W = cv.width, H = cv.height;
-    ctx2d.clearRect(0, 0, W, H);
-    const an = window._vizAnalyser;
-    const bars = 32;
-    const bw = W / bars;
-    let data = null;
-    if (an) {
-      data = new Uint8Array(an.frequencyBinCount);
-      an.getByteFrequencyData(data);
+  if (listening) { stopListening(); return; }
+  try {
+    recog = new SR();
+  } catch (e) {
+    toast('Mic on nahi ho saka — neeche likh kar bhejein.');
+    return;
+  }
+  recog.lang = recogLang;
+  recog.interimResults = true;
+  recog.continuous = false;
+  recog.maxAlternatives = 1;
+  recog.onresult = (ev) => {
+    let interim = '', final = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const r = ev.results[i];
+      if (r.isFinal) final += r[0].transcript;
+      else interim += r[0].transcript;
     }
-    const dark = document.documentElement.getAttribute('data-theme') !== 'light';
-    for (let i = 0; i < bars; i++) {
-      const v = data ? data[Math.floor(i * data.length / bars)] / 255 : 0.04;
-      const h = Math.max(3, v * H);
-      ctx2d.fillStyle = recording ? '#f31260' : (dark ? '#3a4358' : '#c9d2e0');
-      const x = i * bw + 1;
-      ctx2d.fillRect(x, (H - h) / 2, bw - 2, h);
+    const inp = $('chat-input');
+    if (final) {
+      inp.value = final.trim();
+      stopListening();
+      const q = inp.value.trim();
+      inp.value = '';
+      if (q) askTutor(q);
+    } else if (interim) {
+      inp.value = interim;
     }
   };
-  draw();
+  recog.onerror = (ev) => {
+    const err = (ev && ev.error) || '';
+    console.error('Speech recog error:', err);
+    if ((err === 'no-speech' || err === 'audio-capture') && recogLang === 'ur-PK' && !recogRetried) {
+      // ek dafa English me retry
+      recogRetried = true;
+      recogLang = 'en-US';
+      stopListening();
+      toast('Urdu samajh nahi ayi — English me dobara koshish karein 🎤');
+      setTimeout(startListening, 400);
+      return;
+    }
+    stopListening();
+    if (err === 'not-allowed' || err === 'service-not-allowed') toast('Mic ki ijazat nahi mili — browser settings me allow karein.');
+    else if (err === 'network') toast('Internet ka masla — dobara koshish karein.');
+    else toast('Awaz samajh nahi ayi — neeche likh kar bhejein.');
+  };
+  recog.onend = () => { if (listening) setListening(false); };
+  try {
+    recog.start();
+    setListening(true);
+  } catch (e) {
+    toast('Mic on nahi ho saka — neeche likh kar bhejein.');
+  }
 }
-function stopVisualizer() {
-  if (vizRAF) cancelAnimationFrame(vizRAF);
-  vizRAF = null;
-  // flat line dikhao
-  const cv = $('visualizer');
-  const ctx2d = cv.getContext('2d');
-  ctx2d.clearRect(0, 0, cv.width, cv.height);
+function stopListening() {
+  if (recog) { try { recog.onend = null; recog.stop(); } catch (e) {} recog = null; }
+  if (listening) setListening(false);
+}
+
+/* ---------------- chat input (text) ---------------- */
+function wireChat() {
+  $('btn-mic').addEventListener('click', () => {
+    if (!apiKey) { toast('Pehle API key save karein'); goKey(); return; }
+    startListening();
+  });
+  const send = () => {
+    if (!apiKey) { toast('Pehle API key save karein'); goKey(); return; }
+    const inp = $('chat-input');
+    const q = inp.value.trim();
+    if (!q) return;
+    inp.value = '';
+    askTutor(q);
+  };
+  $('btn-send').addEventListener('click', send);
+  $('chat-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); send(); }
+  });
+  wireSpeaker();
 }
 
 /* ==========================================================================
@@ -602,16 +482,6 @@ function addMsg(role, text) {
   transcriptEl.appendChild(div);
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
   return div;
-}
-
-// model ka streaming text — musalsal chunks ek hi bubble me jurein
-function handleModelText(chunk) {
-  if (!currentAiDiv) currentAiDiv = addMsg('ai', '');
-  const body = currentAiDiv.querySelector('span:last-child');
-  body.textContent += chunk;
-  transcriptEl.scrollTop = transcriptEl.scrollHeight;
-  if (collectingQuiz) quizBuffer += chunk;
-  renderDiagrams(false);
 }
 
 /* ---------------- Diagram tab: ```mermaid blocks ---------------- */
@@ -698,22 +568,11 @@ function renderQuiz(items) {
   });
 }
 
-function finishQuiz() {
-  collectingQuiz = false;
-  renderQuiz(parseQuiz(quizBuffer));
-  quizBuffer = '';
-  // quiz tab par le jao taake user dekhe
-  switchTab('quiz');
-  toast('Quiz tayyar hai! 📝', true);
-}
-
 function wireQuiz() {
   $('btn-quiz').addEventListener('click', () => {
-    if (!session || !session.ready) { toast('Pehle "Session start" dabayein'); return; }
-    collectingQuiz = true;
-    quizBuffer = '';
+    if (!apiKey) { toast('Pehle API key save karein'); goKey(); return; }
     quizWrap.innerHTML = '<p class="muted">⏳ Quiz ban raha hai…</p>';
-    session.sendText(QUIZ_PROMPT);
+    askTutor(QUIZ_PROMPT, 'quiz');
   });
 }
 
@@ -735,15 +594,14 @@ function wireTabs() {
 let pdfDoc = null, pdfPage = 1, pdfScale = 1.4;
 
 function resetAllState() {
-  // Nayi file = mukammal reset: session, transcript, quiz, diagram sab saaf
-  stopSessionQuiet();
-  setStatus('off', 'Disconnected');
-  updateSessionUI();
-  transcriptEl.innerHTML = '<p class="muted placeholder">Abhi koi guftagu nahi — session start karke bolein 🎙</p>';
+  // Nayi file = mukammal reset: guftagu, transcript, quiz, diagram sab saaf
+  stopSpeaking();
+  stopListening();
+  chatHistory = [];
+  setReady();
+  transcriptEl.innerHTML = '<p class="muted placeholder">Abhi koi guftagu nahi — neeche likhein ya 🎤 dabayein 🎙</p>';
   diagramWrap.innerHTML = '<p class="muted placeholder">Diagram yahan nazar ayega — tutor se kahein "is ka diagram banao"</p>';
   quizWrap.innerHTML = '';
-  currentAiDiv = null;
-  collectingQuiz = false; quizBuffer = '';
   renderedDiagramCount = 0;
   docText = ''; docName = '';
   $('doc-name').textContent = '';
@@ -776,7 +634,7 @@ async function handleFile(file) {
     toast('PDF load ho gayi — text nikala ja raha hai…', true);
     docText = await extractPdfText(pdfDoc);
     if (!docText.trim()) toast('Is PDF se text nahi nikal saka (shayad scanned tasveer hai)');
-    else toast('Tayyar! Session start karke parhna shuru karein 📖', true);
+    else toast('Tayyar! Neeche sawal likhein ya 🎤 dabayein 📖', true);
   } catch (e) {
     console.error('PDF fail:', e);
     toast('PDF kholne me masla hua — file check karein');
@@ -855,11 +713,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   wireAuth();
   wireKeyScreen();
-  wireSession();
+  wireChat();
   wireDocument();
   wireTabs();
   wireQuiz();
   initFirebase();
   goLogin();
-  updateSessionUI();
 });
